@@ -482,73 +482,75 @@ class Client(AccountsEndpointsMixin, DiscoverEndpointsMixin, FeedEndpointsMixin,
         return res
 
     def _call_api(self, endpoint, params=None, query=None, return_response=False, unsigned=False, version='v1'):
-        """
-        Calls the private api.
+    """
+    Calls the private API.
 
-        :param endpoint: endpoint path that should end with '/', example 'discover/explore/'
-        :param params: POST parameters
-        :param query: GET url query parameters
-        :param return_response: return the response instead of the parsed json object
-        :param unsigned: use post params as-is without signing
-        :param version: for the versioned api base url. Default 'v1'.
-        :return:
-        """
-        url = '{0}{1}'.format(self.api_url.format(version=version), endpoint)
-        if query:
-            url += ('?' if '?' not in endpoint else '&') + compat_urllib_parse.urlencode(query)
+    :param endpoint: Endpoint path that should end with '/', example 'discover/explore/'
+    :param params: POST parameters
+    :param query: GET URL query parameters
+    :param return_response: Return the response instead of the parsed JSON object
+    :param unsigned: Use POST params as-is without signing
+    :param version: Versioned API base URL. Default 'v1'.
+    :return: Response or JSON object
+    """
+    url = '{0}{1}'.format(self.api_url.format(version=version), endpoint)
+    if query:
+        url += ('?' if '?' not in endpoint else '&') + compat_urllib_parse.urlencode(query)
 
-        headers = self.default_headers
-        data = None
-        if params or params == '':
-            headers['Content-type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-            if params == '':    # force post if empty string
-                data = ''.encode('ascii')
+    headers = self.default_headers
+    data = None
+    if params or params == '':
+        headers['Content-type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+        if params == '':  # Force POST if empty string
+            data = ''.encode('ascii')
+        else:
+            if not unsigned:
+                json_params = json.dumps(params, separators=(',', ':'))
+                hash_sig = self._generate_signature(json_params)
+                post_params = {
+                    'ig_sig_key_version': self.key_version,
+                    'signed_body': hash_sig + '.' + json_params
+                }
             else:
-                if not unsigned:
-                    json_params = json.dumps(params, separators=(',', ':'))
-                    hash_sig = self._generate_signature(json_params)
-                    post_params = {
-                        'ig_sig_key_version': self.key_version,
-                        'signed_body': hash_sig + '.' + json_params
-                    }
-                else:
-                    # direct form post
-                    post_params = params
-                data = compat_urllib_parse.urlencode(post_params).encode('ascii')
+                # Direct form POST
+                post_params = params
+            data = compat_urllib_parse.urlencode(post_params).encode('ascii')
 
-        req = compat_urllib_request.Request(url, data, headers=headers)
-        try:
-            self.logger.debug('REQUEST: {0!s} {1!s}'.format(url, req.get_method()))
-            self.logger.debug('DATA: {0!s}'.format(data))
-            response = self.opener.open(req, timeout=self.timeout)
-        except compat_urllib_error.HTTPError as e:
-            error_response = self._read_response(e)
-            self.logger.debug('RESPONSE: {0:d} {1!s}'.format(e.code, error_response))
-            ErrorHandler.process(e, error_response)
+    req = compat_urllib_request.Request(url, data, headers=headers)
+    try:
+        self.logger.debug('REQUEST: {0!s} {1!s}'.format(url, req.get_method()))
+        self.logger.debug('DATA: {0!s}'.format(data))
+        response = self.opener.open(req, timeout=self.timeout)
+    except compat_urllib_error.HTTPError as e:
+        error_response = self._read_response(e)
+        self.logger.debug('RESPONSE: {0:d} {1!s}'.format(e.code, error_response))
+        ErrorHandler.process(e, error_response)
+        raise
+    except (SSLError, timeout, SocketError,
+            compat_urllib_error.URLError,   # URLError is base of HTTPError
+            compat_http_client.HTTPException,
+            ConnectionError) as connection_error:
+        self.logger.error('Connection error: {}'.format(connection_error))
+        raise ClientConnectionError('{} {}'.format(
+            connection_error.__class__.__name__, str(connection_error)))
 
-        except (SSLError, timeout, SocketError,
-                compat_urllib_error.URLError,   # URLError is base of HTTPError
-                compat_http_client.HTTPException,
-                ConnectionError) as connection_error:
-            raise ClientConnectionError('{} {}'.format(
-                connection_error.__class__.__name__, str(connection_error)))
+    if return_response:
+        return response
 
-        if return_response:
-            return response
+    response_content = self._read_response(response)
+    self.logger.debug('RESPONSE: {0:d} {1!s}'.format(response.code, response_content))
+    json_response = json.loads(response_content)
 
-        response_content = self._read_response(response)
-        self.logger.debug('RESPONSE: {0:d} {1!s}'.format(response.code, response_content))
-        json_response = json.loads(response_content)
+    if json_response.get('message', '') == 'login_required':
+        raise ClientLoginRequiredError(
+            json_response.get('message'), code=response.code,
+            error_response=json.dumps(json_response))
 
-        if json_response.get('message', '') == 'login_required':
-            raise ClientLoginRequiredError(
-                json_response.get('message'), code=response.code,
-                error_response=json.dumps(json_response))
+    # Not from oembed or an OK response
+    if not json_response.get('provider_url') and json_response.get('status', '') != 'ok':
+        raise ClientError(
+            json_response.get('message', 'Unknown error'), code=response.code,
+            error_response=json.dumps(json_response))
 
-        # not from oembed or an ok response
-        if not json_response.get('provider_url') and json_response.get('status', '') != 'ok':
-            raise ClientError(
-                json_response.get('message', 'Unknown error'), code=response.code,
-                error_response=json.dumps(json_response))
+    return json_response
 
-        return json_response
